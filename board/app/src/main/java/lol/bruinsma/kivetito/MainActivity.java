@@ -34,13 +34,14 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import lol.bruinsma.kivetito.core.BoardServer;
+import lol.bruinsma.kivetito.core.RelayClient;
 
 public class MainActivity extends Activity implements Hub.Ui {
     static final String EXTRA_AUTO = "auto";
 
     private ImageView screen;
     private LinearLayout idlePanel, liveBar;
-    private TextView nameView, ipView, liveText, hintView;
+    private TextView nameView, ipView, liveText, hintView, codeView;
     private Button overlayBtn, forgetBtn;
     private AlertDialog approvalDialog;
 
@@ -146,6 +147,21 @@ public class MainActivity extends Activity implements Hub.Ui {
     }
 
     @Override
+    public void relayChanged() {
+        if (codeView == null) return;
+        String url = BoardService.relayUrl(this);
+        if (url.isEmpty()) {
+            codeView.setText("Relay kikapcsolva – csak azonos hálózatról érhető el");
+        } else if (Hub.relayOnline && Hub.relayCode != null) {
+            String c = Hub.relayCode;
+            String pretty = c.length() == 6 ? c.substring(0, 3) + " " + c.substring(3) : c;
+            codeView.setText("Más hálózatról: Kivetítő menü → Tábla hozzáadása → kód: " + pretty);
+        } else {
+            codeView.setText("Relay nem érhető el (" + url.replaceFirst("^wss?://", "") + ") – csak azonos hálózatról");
+        }
+    }
+
+    @Override
     public void approvalCancelled() {
         if (approvalDialog != null) { approvalDialog.dismiss(); approvalDialog = null; }
     }
@@ -178,6 +194,9 @@ public class MainActivity extends Activity implements Hub.Ui {
         hintView = text("", 22, Color.parseColor("#D1D5DB"), false);
         hintView.setPadding(0, dp(16), 0, dp(8));
         idlePanel.addView(hintView);
+        codeView = text("", 20, Color.parseColor("#93C5FD"), false);
+        codeView.setPadding(0, 0, 0, dp(8));
+        idlePanel.addView(codeView);
         ipView = text("", 16, Color.parseColor("#6B7280"), false);
         idlePanel.addView(ipView);
 
@@ -185,6 +204,7 @@ public class MainActivity extends Activity implements Hub.Ui {
         buttons.setGravity(Gravity.CENTER);
         buttons.setPadding(0, dp(32), 0, 0);
         buttons.addView(button("Tábla neve…", v -> renameDialog()));
+        buttons.addView(button("Relay…", v -> relayDialog()));
         forgetBtn = button("", v -> forgetDialog());
         buttons.addView(forgetBtn);
         overlayBtn = button("Automatikus megjelenés engedélyezése", v -> requestOverlay());
@@ -219,6 +239,7 @@ public class MainActivity extends Activity implements Hub.Ui {
         int n = BoardService.trustedCount(this);
         forgetBtn.setText("Laptopok elfelejtése (" + n + ")");
         forgetBtn.setVisibility(n > 0 ? View.VISIBLE : View.GONE);
+        relayChanged();
         boolean needOverlay = Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this);
         overlayBtn.setVisibility(needOverlay ? View.VISIBLE : View.GONE);
     }
@@ -236,6 +257,34 @@ public class MainActivity extends Activity implements Hub.Ui {
                     getSharedPreferences(BoardService.PREFS, MODE_PRIVATE).edit().putString("boardName", n).apply();
                     BoardServer s = Hub.server;
                     if (s != null) s.setBoardName(BoardService.boardName(this));
+                    RelayClient r = Hub.relay;
+                    if (r != null) r.update(BoardService.relayUrl(this), BoardService.boardName(this));
+                    refreshIdleInfo();
+                })
+                .setNegativeButton("Mégse", null)
+                .show();
+    }
+
+    private void relayDialog() {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        input.setText(BoardService.relayUrl(this));
+        new AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                .setTitle("Relay szerver (üresen hagyva: kikapcsolva)")
+                .setView(input)
+                .setPositiveButton("Mentés", (d, w) -> {
+                    String u = input.getText().toString().trim();
+                    getSharedPreferences(BoardService.PREFS, MODE_PRIVATE).edit().putString("relayUrl", u).apply();
+                    Hub.relayOnline = false;
+                    RelayClient r = Hub.relay;
+                    if (r != null) r.update(u, BoardService.boardName(this));
+                    refreshIdleInfo();
+                })
+                .setNeutralButton("Alapértelmezett", (d, w) -> {
+                    getSharedPreferences(BoardService.PREFS, MODE_PRIVATE).edit().remove("relayUrl").apply();
+                    Hub.relayOnline = false;
+                    RelayClient r = Hub.relay;
+                    if (r != null) r.update(BoardService.DEFAULT_RELAY, BoardService.boardName(this));
                     refreshIdleInfo();
                 })
                 .setNegativeButton("Mégse", null)

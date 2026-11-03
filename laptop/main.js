@@ -8,11 +8,15 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { Discovery, probeHost } = require('./lib/discovery');
-const { BoardConnection } = require('./lib/connection');
+const { BoardConnection, dialTcp } = require('./lib/connection');
+const { RelayDirectory, lookupCode, dialRelay, httpBase } = require('./lib/relay');
 
 const APP_NAME = 'Kivetítő';
 const SHORTCUT = 'CommandOrControl+Shift+K';
 const isMac = process.platform === 'darwin';
+const DEFAULT_RELAY = 'wss://kivetito.bruinsma.lol';
+// Over the internet: cap the stream so a school uplink can keep up.
+const RELAY_CAP = { fps: 8, maxWidth: 1600, quality: 0.65 };
 const PRESETS = {
   low: { label: 'Alacsony (gyenge Wi-Fi)', fps: 8, maxWidth: 1280, quality: 0.6 },
   normal: { label: 'Normál (diák, dokumentum)', fps: 12, maxWidth: 1920, quality: 0.7 },
@@ -32,6 +36,8 @@ function loadConfig() {
   config.manualHosts ||= [];     // typed-in IPs
   config.knownBoards ||= {};     // boardId -> {name, host, port} (last seen)
   config.preset ||= 'normal';
+  config.relayUrl ||= DEFAULT_RELAY;
+  if (config.relayEnabled === undefined) config.relayEnabled = true;
   saveConfig();
 }
 function saveConfig() {
@@ -44,16 +50,48 @@ const clientName = () => os.hostname().replace(/\.local$/i, '');
 let tray = null;
 let captureWin = null;
 const discovery = new Discovery();
+const relayDir = new RelayDirectory({
+  getUrl: () => config.relayUrl,
+  getIds: () => Object.keys(config.knownBoards),
+  isEnabled: () => !!config.relayEnabled,
+});
 const share = {
   boardId: null,     // which board we want to share to (null = not sharing)
   conn: null,
+  transport: null,   // 'lan' | 'relay'
   status: 'idle',    // idle | connecting | waiting | live | reconnecting
   reconnectUntil: 0,
   reconnectTimer: null,
 };
 
+/** Everything we know about a board: name, LAN address (if any), whether the relay sees it. */
 function boardInfo(id) {
-  return discovery.get(id) || config.knownBoards[id] || null;
+  const lan = discovery.get(id);
+  const relay = config.relayEnabled ? relayDir.get(id) : null;
+  const known = config.knownBoards[id];
+  if (!lan && !relay && !known) return null;
+  return {
+    id,
+    name: lan?.name || relay?.name || known?.name || 'Tábla',
+    host: lan?.host || known?.host || null,
+    port: lan?.port || known?.port || 47800,
+    lanSeen: !!lan,
+    relayOnline: !!relay,
+  };
+}
+
+function allBoards() {
+  const ids = new Set([...discovery.list().map((b) => b.id), ...relayDir.list().map((b) => b.id)]);
+  if (share.boardId) ids.add(share.boardId);
+  return [...ids].map(boardInfo).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name, 'hu'));
+}
+
+/** Transports to try, best first. */
+function transportsFor(b) {
+  const out = [];
+  if (b.host) out.push('lan');           // seen on LAN, or a remembered / typed-in IP
+  if (config.relayEnabled && config.relayUrl) out.push('relay');
+  return out;
 }
 
 function notify(body) {
@@ -64,7 +102,7 @@ function notify(body) {
 async function startShare(boardId) {
   stopShare({ quiet: true });
   const b = boardInfo(boardId);
-  if (!b) { notify('A tábla most nem található a hálózaton.'); return; }
+  if (!b) { notify('A tábla most nem érhető el.'); return; }
   if (!(await ensureScreenPermission())) return;
   share.boardId = boardId;
   config.lastBoard = boardId;
@@ -72,17 +110,22 @@ async function startShare(boardId) {
   connect();
 }
 
-function connect() {
+function connect(order = null, idx = 0) {
   const b = boardInfo(share.boardId);
   if (!b) return scheduleReconnect();
-  share.status = share.status === 'reconnecting' ? 'reconnecting' : 'connecting';
+  order ||= transportsFor(b);
+  if (idx >= order.length) return scheduleReconnect();
+  const transport = order[idx];
+  if (share.status !== 'reconnecting') share.status = 'connecting';
   updateTray();
 
   const conn = new BoardConnection({
-    host: b.host, port: b.port, clientId: config.clientId, clientName: clientName(),
+    dial: transport === 'lan' ? () => dialTcp(b.host, b.port) : () => dialRelay(config.relayUrl, b.id),
+    clientId: config.clientId, clientName: clientName(),
     token: config.tokens[share.boardId],
   });
   share.conn = conn;
+  share.transport = transport;
 
   conn.on('waiting', () => {
     share.status = 'waiting'; updateTray();
@@ -90,7 +133,12 @@ function connect() {
   });
   conn.on('ready', (token) => {
     config.tokens[share.boardId] = token;
-    config.knownBoards[share.boardId] = { name: b.name, host: b.host, port: b.port };
+    const prev = config.knownBoards[share.boardId] || {};
+    config.knownBoards[share.boardId] = {
+      name: b.name,
+      host: transport === 'lan' ? b.host : prev.host || null,
+      port: b.port,
+    };
     saveConfig();
     share.status = 'live';
     share.reconnectUntil = 0;
@@ -100,9 +148,11 @@ function connect() {
   conn.on('denied', () => { stopShare({ quiet: true }); notify('A táblán elutasították a kapcsolatot.'); });
   conn.on('timeout', () => { stopShare({ quiet: true }); notify('Senki nem fogadta el a táblán. Próbáld újra.'); });
   conn.on('bye', () => { stopShare({ quiet: true }); notify('A kivetítés véget ért (a táblán leállították vagy más laptop vette át).'); });
-  conn.on('closed', () => {
+  conn.on('closed', (_err, wasReady) => {
     if (share.conn !== conn) return;
     stopCapture();
+    // Couldn't even get through this way (e.g. school network blocks LAN) → try the next transport now.
+    if (!wasReady && idx + 1 < order.length) return connect(order, idx + 1);
     scheduleReconnect();
   });
   conn.connect();
@@ -121,7 +171,7 @@ function scheduleReconnect() {
   share.status = 'reconnecting';
   updateTray();
   clearTimeout(share.reconnectTimer);
-  share.reconnectTimer = setTimeout(() => { discovery.probe(); setTimeout(connect, 500); }, 1500);
+  share.reconnectTimer = setTimeout(() => { discovery.probe(); relayDir.poll(); setTimeout(() => connect(), 500); }, 1500);
 }
 
 function stopShare({ quiet = false } = {}) {
@@ -129,7 +179,7 @@ function stopShare({ quiet = false } = {}) {
   clearTimeout(share.reconnectTimer);
   stopCapture();
   if (share.conn) share.conn.close();
-  Object.assign(share, { boardId: null, conn: null, status: 'idle', reconnectUntil: 0 });
+  Object.assign(share, { boardId: null, conn: null, transport: null, status: 'idle', reconnectUntil: 0 });
   updateTray();
   if (wasSharing && !quiet) notify('Kivetítés leállítva.');
 }
@@ -137,9 +187,9 @@ function stopShare({ quiet = false } = {}) {
 function toggleLast() {
   if (share.boardId) return stopShare();
   if (config.lastBoard && boardInfo(config.lastBoard)) return startShare(config.lastBoard);
-  const boards = discovery.list();
+  const boards = allBoards();
   if (boards.length === 1) return startShare(boards[0].id);
-  notify(boards.length ? 'Válaszd ki a táblát a Kivetítő menüjében.' : 'Nem található tábla a hálózaton.');
+  notify(boards.length ? 'Válaszd ki a táblát a Kivetítő menüjében.' : 'Nem található tábla.');
   if (!isMac) tray.popUpContextMenu();
 }
 
@@ -158,9 +208,19 @@ function createCaptureWindow() {
   captureWin.loadFile(path.join(__dirname, 'capture', 'capture.html'));
 }
 
-function startCapture() {
+function captureSettings() {
   const p = PRESETS[config.preset] || PRESETS.normal;
-  captureWin.webContents.send('kv:start', { fps: p.fps, maxWidth: p.maxWidth, quality: p.quality });
+  const s = { fps: p.fps, maxWidth: p.maxWidth, quality: p.quality };
+  if (share.transport === 'relay') {
+    s.fps = Math.min(s.fps, RELAY_CAP.fps);
+    s.maxWidth = Math.min(s.maxWidth, RELAY_CAP.maxWidth);
+    s.quality = Math.min(s.quality, RELAY_CAP.quality);
+  }
+  return s;
+}
+
+function startCapture() {
+  captureWin.webContents.send('kv:start', captureSettings());
 }
 function stopCapture() { if (captureWin) captureWin.webContents.send('kv:stop'); }
 
@@ -221,16 +281,31 @@ function promptForIp() {
   });
 }
 
-async function addBoardByIp() {
-  const ip = await promptForIp();
-  if (!ip) return;
-  const b = await probeHost(ip);
+/** Accepts the board's IP (same network) or its 6-digit code (via the relay). */
+async function addBoard() {
+  const input = await promptForIp();
+  if (!input) return;
+  const digits = input.replace(/\s/g, '');
+  if (/^\d{6}$/.test(digits)) {
+    if (!config.relayEnabled) config.relayEnabled = true;
+    const b = await lookupCode(config.relayUrl, digits);
+    if (!b) {
+      dialog.showMessageBox({ type: 'warning', message: `Nincs online tábla ezzel a kóddal: ${digits}`,
+        detail: 'Ellenőrizd a kódot a táblán (a Kivetítő képernyőjén látszik), és hogy a tábla kapcsolódik-e az internethez.' });
+      return;
+    }
+    config.knownBoards[b.id] = { name: b.name, host: config.knownBoards[b.id]?.host || null, port: 47800 };
+    saveConfig();
+    await relayDir.poll();
+    return startShare(b.id);
+  }
+  const b = await probeHost(input);
   if (!b) {
-    dialog.showMessageBox({ type: 'warning', message: `Nem válaszol tábla ezen a címen: ${ip}`,
-      detail: 'Ellenőrizd, hogy a táblán fut-e a Kivetítő, és hogy a laptop ugyanazon a hálózaton van-e.' });
+    dialog.showMessageBox({ type: 'warning', message: `Nem válaszol tábla ezen a címen: ${input}`,
+      detail: 'Valószínűleg külön hálózaton vagytok. Írd be inkább a táblán látható 6 jegyű kódot – az interneten át is működik.' });
     return;
   }
-  if (!config.manualHosts.includes(ip)) config.manualHosts.push(ip);
+  if (!config.manualHosts.includes(input)) config.manualHosts.push(input);
   config.knownBoards[b.id] = { name: b.name, host: b.host, port: b.port };
   saveConfig();
   discovery.setManualHosts(config.manualHosts);
@@ -248,7 +323,7 @@ function statusLabel() {
   switch (share.status) {
     case 'connecting': return `Kapcsolódás: ${name}…`;
     case 'waiting': return `Engedélyezd a táblán: ${name}`;
-    case 'live': return `● Kivetítés: ${name}`;
+    case 'live': return `● Kivetítés: ${name}${share.transport === 'relay' ? ' (interneten át)' : ''}`;
     case 'reconnecting': return `Újrakapcsolódás: ${name}…`;
     default: return 'Nincs kivetítés';
   }
@@ -260,28 +335,24 @@ function updateTray() {
   tray.setImage(live ? icon('tray-live.png') : icon(isMac ? 'trayTemplate.png' : 'tray.png'));
   tray.setToolTip(`${APP_NAME} – ${statusLabel()}`);
 
-  const boards = discovery.list();
-  // Show boards we're sharing to / know from manual IPs even if a broadcast just missed.
-  if (share.boardId && !boards.find((b) => b.id === share.boardId) && boardInfo(share.boardId)) {
-    boards.unshift({ id: share.boardId, ...boardInfo(share.boardId) });
-  }
+  const boards = allBoards();
 
   const displays = screen.getAllDisplays();
   const template = [
     { label: statusLabel(), enabled: false },
     ...(share.boardId ? [{ label: 'Kivetítés leállítása', accelerator: SHORTCUT, click: () => stopShare() }] : []),
     { type: 'separator' },
-    { label: 'Táblák a hálózaton:', enabled: false },
+    { label: 'Táblák:', enabled: false },
     ...(boards.length
       ? boards.map((b) => ({
-          label: b.name + (config.tokens[b.id] ? '' : '  (első alkalommal engedélyezni kell)'),
+          label: b.name + (!b.lanSeen && b.relayOnline ? '  ☁' : '') + (config.tokens[b.id] ? '' : '  (első alkalommal engedélyezni kell)'),
           type: 'checkbox',
           checked: share.boardId === b.id,
           accelerator: share.boardId !== b.id && config.lastBoard === b.id ? SHORTCUT : undefined,
           click: () => (share.boardId === b.id ? stopShare() : startShare(b.id)),
         }))
       : [{ label: '   keresés…', enabled: false }]),
-    { label: 'Tábla hozzáadása IP-cím alapján…', click: addBoardByIp },
+    { label: 'Tábla hozzáadása (kód vagy IP-cím)…', click: addBoard },
     { type: 'separator' },
     {
       label: 'Beállítások',
@@ -301,10 +372,15 @@ function updateTray() {
           label: p.label, type: 'radio', checked: config.preset === k,
           click: () => {
             config.preset = k; saveConfig();
-            captureWin.webContents.send('kv:settings', { fps: p.fps, maxWidth: p.maxWidth, quality: p.quality });
+            captureWin.webContents.send('kv:settings', captureSettings());
           },
         })),
         { type: 'separator' },
+        {
+          label: `Relay használata (${httpBase(config.relayUrl).replace(/^https?:\/\//, '')})${config.relayEnabled ? (relayDir.online ? ' – elérhető' : ' – nem érhető el') : ''}`,
+          type: 'checkbox', checked: !!config.relayEnabled,
+          click: (item) => { config.relayEnabled = item.checked; saveConfig(); relayDir.poll(); updateTray(); },
+        },
         {
           label: 'Indítás bejelentkezéskor', type: 'checkbox',
           checked: app.getLoginItemSettings().openAtLogin,
@@ -353,6 +429,8 @@ app.whenReady().then(() => {
   discovery.on('change', updateTray);
   discovery.setManualHosts(config.manualHosts);
   discovery.start();
+  relayDir.on('change', updateTray);
+  relayDir.start();
 
   globalShortcut.register(SHORTCUT, toggleLast);
   screen.on('display-added', updateTray);
@@ -367,4 +445,4 @@ app.whenReady().then(() => {
 
 app.on('second-instance', () => { if (!isMac) tray?.popUpContextMenu(); });
 app.on('window-all-closed', (e) => e.preventDefault()); // tray app: stay alive
-app.on('will-quit', () => { globalShortcut.unregisterAll(); stopShare({ quiet: true }); discovery.stop(); });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); stopShare({ quiet: true }); discovery.stop(); relayDir.stop(); });

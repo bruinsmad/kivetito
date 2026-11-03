@@ -1,4 +1,5 @@
-// One TCP session to a board: handshake, then length-prefixed JPEG frames.
+// One session to a board: handshake, then length-prefixed JPEG frames.
+// The byte stream is either a direct TCP socket or a relayed WebSocket (see lib/relay.js).
 const net = require('net');
 const { EventEmitter } = require('events');
 
@@ -6,40 +7,66 @@ const KEEPALIVE_MS = 2000;
 const CONNECT_TIMEOUT_MS = 5000;
 const MAX_BUFFERED = 1024 * 1024; // drop frames rather than build up latency
 
+/** Direct TCP dialer. */
+function dialTcp(host, port) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect({ host, port });
+    s.once('connect', () => {
+      s.removeListener('error', reject);
+      s.setNoDelay(true);
+      s.setKeepAlive(true, 5000);
+      resolve(s);
+    });
+    s.once('error', reject);
+  });
+}
+
+function withTimeout(promise, ms) {
+  let t;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { t = setTimeout(() => reject(new Error('connect timeout')), ms); }),
+  ]).finally(() => clearTimeout(t));
+}
+
 /**
  * Events: 'waiting' (board is asking the teacher), 'ready' (token), 'denied', 'timeout',
- *         'bye' (board stopped / another laptop took over), 'closed' (unexpected drop, err)
+ *         'bye' (board stopped / another laptop took over), 'closed' (err, wasReady)
  */
 class BoardConnection extends EventEmitter {
-  constructor({ host, port, clientId, clientName, token }) {
+  /** dial: () => Promise<Duplex>. Or pass {host, port} for direct TCP. */
+  constructor({ dial, host, port, clientId, clientName, token }) {
     super();
-    Object.assign(this, { host, port, clientId, clientName, token: token || '-' });
+    this.dial = dial || (() => dialTcp(host, port));
+    Object.assign(this, { clientId, clientName, token: token || '-' });
     this.state = 'idle';
     this.socket = null;
     this.lastSend = 0;
     this.lastFrame = null;
+    this.everReady = false;
     this._ended = false;
   }
 
-  connect() {
+  async connect() {
     this.state = 'connecting';
-    const sock = net.connect({ host: this.host, port: this.port });
+    let sock;
+    try {
+      sock = await withTimeout(this.dial(), CONNECT_TIMEOUT_MS);
+    } catch (e) {
+      this.state = 'closed';
+      if (!this._ended) this.emit('closed', e, false);
+      return;
+    }
+    if (this._ended) { sock.destroy(); return; }
     this.socket = sock;
-    sock.setNoDelay(true);
-    sock.setKeepAlive(true, 5000);
-    const connectTimer = setTimeout(() => sock.destroy(new Error('connect timeout')), CONNECT_TIMEOUT_MS);
-    let waitTimer = null;
+
+    const clean = (s) => String(s).replace(/[\t\r\n]/g, ' ').slice(0, 60);
+    sock.write(`KIVETITO 1\t${clean(this.clientId)}\t${clean(this.token)}\t${clean(this.clientName)}\n`);
+    this.state = 'hello';
+    // If the board doesn't answer at once, it's showing the "allow this laptop?" dialog.
+    const waitTimer = setTimeout(() => { if (this.state === 'hello') this.emit('waiting'); }, 1500);
+
     let buf = '';
-
-    sock.on('connect', () => {
-      clearTimeout(connectTimer);
-      const clean = (s) => String(s).replace(/[\t\r\n]/g, ' ').slice(0, 60);
-      sock.write(`KIVETITO 1\t${clean(this.clientId)}\t${clean(this.token)}\t${clean(this.clientName)}\n`);
-      this.state = 'hello';
-      // If the board doesn't answer at once, it's showing the "allow this laptop?" dialog.
-      waitTimer = setTimeout(() => { if (this.state === 'hello') this.emit('waiting'); }, 1200);
-    });
-
     sock.on('data', (chunk) => {
       buf += chunk.toString('utf8');
       let nl;
@@ -49,13 +76,12 @@ class BoardConnection extends EventEmitter {
         this._onLine(line);
       }
     });
-
     sock.on('error', (e) => { this._err = e; });
     sock.on('close', () => {
-      clearTimeout(connectTimer); clearTimeout(waitTimer); clearInterval(this._ka);
-      const wasLive = this.state === 'live' || this.state === 'hello' || this.state === 'connecting';
+      clearTimeout(waitTimer);
+      clearInterval(this._ka);
       this.state = 'closed';
-      if (!this._ended && wasLive) this.emit('closed', this._err || null);
+      if (!this._ended) this.emit('closed', this._err || null, this.everReady);
     });
   }
 
@@ -64,13 +90,14 @@ class BoardConnection extends EventEmitter {
       if (line.startsWith('OK\t')) {
         this.token = line.slice(3);
         this.state = 'live';
+        this.everReady = true;
         this._ka = setInterval(() => {
           if (Date.now() - this.lastSend >= KEEPALIVE_MS) this._write(Buffer.alloc(4));
         }, 500);
         this.emit('ready', this.token);
       } else {
         this._ended = true;
-        this.emit(line === 'DENIED' ? 'denied' : line === 'TIMEOUT' ? 'timeout' : 'closed', new Error(line));
+        this.emit(line === 'DENIED' ? 'denied' : line === 'TIMEOUT' ? 'timeout' : 'closed', new Error(line), false);
         this.socket.destroy();
       }
     } else if (line === 'BYE') {
@@ -85,20 +112,17 @@ class BoardConnection extends EventEmitter {
     return new Promise((resolve) => this.socket.write(buf, () => resolve(true)));
   }
 
-  /** Resolves when the frame has been handed to the OS (natural backpressure). */
+  /** Resolves when the frame has been handed off (natural backpressure). */
   sendFrame(jpeg) {
     if (this.state !== 'live') return Promise.resolve(false);
     if (this.socket.writableLength > MAX_BUFFERED) return Promise.resolve(false);
     // Identical image (static slide): don't resend, keepalive covers it.
     if (this.lastFrame && this.lastFrame.equals(jpeg)) return Promise.resolve(false);
     this.lastFrame = jpeg;
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(jpeg.length, 0);
-    this.socket.cork();
-    this.socket.write(header);
-    const p = this._write(jpeg);
-    this.socket.uncork();
-    return p;
+    const frame = Buffer.allocUnsafe(4 + jpeg.length);
+    frame.writeUInt32BE(jpeg.length, 0);
+    jpeg.copy(frame, 4);
+    return this._write(frame); // one write = one WebSocket message on the relay path
   }
 
   close() {
@@ -109,4 +133,4 @@ class BoardConnection extends EventEmitter {
   }
 }
 
-module.exports = { BoardConnection };
+module.exports = { BoardConnection, dialTcp };

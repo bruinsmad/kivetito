@@ -18,7 +18,8 @@
         android:icon="@drawable/ic_launcher"
         android:banner="@drawable/ic_launcher"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"

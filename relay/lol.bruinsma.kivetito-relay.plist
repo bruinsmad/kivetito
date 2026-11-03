@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Másold ide: ~/Library/LaunchAgents/  és írd át a két útvonalat (node és a relay mappa). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>lol.bruinsma.kivetito-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/CHANGE_ME/kivetito/relay/server.js</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/CHANGE_ME/kivetito/relay</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PORT</key><string>8787</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/kivetito-relay.log</string>
+  <key>StandardErrorPath</key><string>/tmp/kivetito-relay.log</string>
+</dict>
+</plist>

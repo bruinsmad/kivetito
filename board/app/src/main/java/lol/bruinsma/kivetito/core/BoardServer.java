@@ -54,6 +54,23 @@ public final class BoardServer {
         void onLog(String msg);
     }
 
+    /** One byte-stream session: a direct TCP socket or a relayed WebSocket. */
+    public interface Conn {
+        InputStream in() throws IOException;
+        OutputStream out() throws IOException;
+        void setReadTimeout(int ms) throws IOException;
+        void close();
+    }
+
+    static final class SocketConn implements Conn {
+        private final Socket s;
+        SocketConn(Socket s) throws IOException { this.s = s; s.setTcpNoDelay(true); }
+        @Override public InputStream in() throws IOException { return s.getInputStream(); }
+        @Override public OutputStream out() throws IOException { return s.getOutputStream(); }
+        @Override public void setReadTimeout(int ms) throws IOException { s.setSoTimeout(ms); }
+        @Override public void close() { closeQuietly(s); }
+    }
+
     private final String boardId;
     private volatile String boardName;
     private final Auth auth;
@@ -64,7 +81,7 @@ public final class BoardServer {
     private ServerSocket server;
     private DatagramSocket udp;
     private final Object sessionLock = new Object();
-    private Socket active; // guarded by sessionLock
+    private Conn active; // guarded by sessionLock
 
     public BoardServer(String boardId, String boardName, Auth auth, Listener listener) {
         this(boardId, boardName, auth, listener, TCP_PORT, UDP_PORT);
@@ -100,7 +117,7 @@ public final class BoardServer {
         running.set(false);
         closeQuietly(server);
         if (udp != null) udp.close();
-        synchronized (sessionLock) { closeQuietly(active); active = null; }
+        synchronized (sessionLock) { if (active != null) active.close(); active = null; }
     }
 
     /** Ends the current session (e.g. teacher taps "stop" on the board). */
@@ -109,10 +126,10 @@ public final class BoardServer {
     }
 
     /** Tells the laptop to stop (so it doesn't auto-reconnect), then closes. */
-    private static void sayByeAndClose(Socket s) {
-        if (s == null) return;
-        try { write(s.getOutputStream(), "BYE\n"); } catch (IOException ignored) {}
-        closeQuietly(s);
+    private static void sayByeAndClose(Conn c) {
+        if (c == null) return;
+        try { write(c.out(), "BYE\n"); } catch (IOException ignored) {}
+        c.close();
     }
 
     // ---------- discovery ----------
@@ -137,20 +154,22 @@ public final class BoardServer {
         while (running.get()) {
             try {
                 Socket s = server.accept();
-                thread("kv-session", () -> handle(s));
+                thread("kv-session", () -> {
+                    try { handleConn(new SocketConn(s)); } catch (IOException e) { closeQuietly(s); }
+                });
             } catch (IOException e) {
                 if (running.get()) listener.onLog("accept: " + e.getMessage());
             }
         }
     }
 
-    private void handle(Socket s) {
+    /** Runs one session to completion on the calling thread (direct or relayed). */
+    public void handleConn(Conn s) {
         boolean started = false;
         try {
-            s.setTcpNoDelay(true);
-            s.setSoTimeout(READ_TIMEOUT_MS);
-            InputStream rawIn = new BufferedInputStream(s.getInputStream(), 256 * 1024);
-            OutputStream out = s.getOutputStream();
+            s.setReadTimeout(READ_TIMEOUT_MS);
+            InputStream rawIn = new BufferedInputStream(s.in(), 256 * 1024);
+            OutputStream out = s.out();
 
             String[] hello = readLine(rawIn).split("\t", 4);
             if (hello.length < 4 || !hello[0].equals("KIVETITO 1")) { listener.onLog("bad hello"); return; }
@@ -158,7 +177,7 @@ public final class BoardServer {
 
             String grantedToken = token;
             if (!auth.isTrusted(clientId, token)) {
-                s.setSoTimeout(0);
+                s.setReadTimeout(0);
                 CountDownLatch latch = new CountDownLatch(1);
                 boolean[] allowed = {false};
                 AtomicBoolean answered = new AtomicBoolean(false);
@@ -172,7 +191,7 @@ public final class BoardServer {
                 }
                 if (!allowed[0]) { write(out, "DENIED\n"); return; }
                 grantedToken = auth.issueToken(clientId, clientName);
-                s.setSoTimeout(READ_TIMEOUT_MS);
+                s.setReadTimeout(READ_TIMEOUT_MS);
             }
             write(out, "OK\t" + grantedToken + "\n");
 
@@ -204,7 +223,7 @@ public final class BoardServer {
                 wasActive = active == s;
                 if (wasActive) active = null;
             }
-            closeQuietly(s);
+            s.close();
             if (started && wasActive) listener.onSessionEnd();
         }
     }

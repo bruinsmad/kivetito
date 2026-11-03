@@ -45,6 +45,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
           npm install
+          npm install --prefix ../relay
           npm test
           npm run ${{ matrix.cmd }} -- --publish never
       - uses: actions/upload-artifact@v4

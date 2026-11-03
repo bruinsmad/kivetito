@@ -10,7 +10,7 @@
     "start": "electron .",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
-    "test": "node test/protocol-test.js"
+    "test": "node test/protocol-test.js && node test/relay-test.js"
   },
   "devDependencies": {
     "electron": "^45.2.1",
@@ -19,15 +19,40 @@
   "build": {
     "appId": "lol.bruinsma.kivetito",
     "productName": "Kivetito",
-    "files": ["main.js", "lib/**", "capture/**", "assets/**"],
-    "directories": { "buildResources": "build", "output": "dist" },
+    "files": [
+      "main.js",
+      "lib/**",
+      "capture/**",
+      "assets/**"
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
       "category": "public.app-category.education",
-      "extendInfo": { "LSUIElement": true }
+      "extendInfo": {
+        "LSUIElement": true
+      }
     },
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64", "arm64"] }]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": true,
@@ -35,5 +60,8 @@
       "runAfterFinish": true,
       "artifactName": "Kivetito-Setup-${version}-${arch}.${ext}"
     }
+  },
+  "dependencies": {
+    "ws": "^8.22.1"
   }
 }

@@ -1,0 +1,9 @@
+{
+  "name": "kivetito-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Kivetítő relay szerver (Mac mini, Cloudflare Tunnel mögött)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.22.1" }
+}

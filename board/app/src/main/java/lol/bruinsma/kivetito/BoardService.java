@@ -22,16 +22,19 @@ import java.security.SecureRandom;
 import java.util.UUID;
 
 import lol.bruinsma.kivetito.core.BoardServer;
+import lol.bruinsma.kivetito.core.RelayClient;
 
 /** Runs the receiver 24/7 (started at boot) and brings the activity to front when someone shares. */
 public class BoardService extends Service {
     private static final String TAG = "Kivetito";
     private static final String CHANNEL = "kivetito";
     static final String PREFS = "kivetito";
+    static final String DEFAULT_RELAY = "wss://kivetito.bruinsma.lol";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private WifiManager.MulticastLock multicastLock;
     private BoardServer server;
+    private RelayClient relay;
 
     static void start(Context ctx) {
         Intent i = new Intent(ctx, BoardService.class);
@@ -57,25 +60,53 @@ public class BoardService extends Service {
         String id = p.getString("boardId", null);
         if (id == null) { id = UUID.randomUUID().toString(); p.edit().putString("boardId", id).apply(); }
 
+        String secret = p.getString("relaySecret", null);
+        if (secret == null) {
+            secret = UUID.randomUUID().toString() + UUID.randomUUID().toString();
+            p.edit().putString("relaySecret", secret).apply();
+        }
+
         server = new BoardServer(id, boardName(this), new PrefsAuth(p), new ServiceListener());
         Hub.server = server;
         new Thread(() -> {
             try { server.start(); }
             catch (Exception e) {
-                Log.e(TAG, "server start failed", e);
-                main.postDelayed(this::stopSelf, 5000); // START_STICKY will restart us
+                // LAN port busy / no network yet: the relay still works, so keep running.
+                Log.e(TAG, "LAN server start failed", e);
             }
         }, "kv-start").start();
+
+        relay = new RelayClient(relayUrl(this), id, secret, boardName(this), server, new OkWsFactory(),
+                new RelayClient.Listener() {
+                    @Override public void onRelayStatus(boolean online, String code) {
+                        main.post(() -> {
+                            Hub.relayOnline = online;
+                            if (code != null) Hub.relayCode = code;
+                            Hub.Ui ui = Hub.ui;
+                            if (ui != null) ui.relayChanged();
+                        });
+                    }
+                    @Override public void onLog(String msg) { Log.i(TAG, msg); }
+                });
+        Hub.relay = relay;
+        relay.start();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
 
     @Override
     public void onDestroy() {
+        if (relay != null) relay.stop();
+        Hub.relay = null;
         if (server != null) server.stop();
         Hub.server = null;
         if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
         super.onDestroy();
+    }
+
+    static String relayUrl(Context ctx) {
+        String u = ctx.getSharedPreferences(PREFS, MODE_PRIVATE).getString("relayUrl", null);
+        return u == null ? DEFAULT_RELAY : u; // empty string = relay switched off
     }
 
     static String boardName(Context ctx) {

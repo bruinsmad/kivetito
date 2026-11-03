@@ -12,9 +12,13 @@ final class Hub {
         void sessionEnded();
         void approvalRequested(String clientName, BoardServer.Approval approval);
         void approvalCancelled();
+        void relayChanged();
     }
 
     static volatile BoardServer server;
+    static volatile lol.bruinsma.kivetito.core.RelayClient relay;
+    static volatile boolean relayOnline;
+    static volatile String relayCode;
     static volatile Ui ui;
 
     static volatile boolean live;
