@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'lol.bruinsma.kivetito'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'lol.bruinsma.kivetito'
+        minSdk 24
+        // 33 on purpose: sideloaded app, avoids Android 14 foreground-service-type rules.
+        targetSdk 33
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Signed with the debug key so `assembleRelease` gives an installable APK without setup.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}

@@ -1,0 +1,7 @@
+node_modules/
+laptop/dist/
+board/.gradle/
+board/build/
+board/app/build/
+board/local.properties
+.DS_Store

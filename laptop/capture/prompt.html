@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="hu"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'self'">
+<title>Tábla hozzáadása</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 18px; }
+  p { margin: 0 0 10px; font-size: 13px; }
+  input { width: 100%; box-sizing: border-box; font-size: 16px; padding: 8px; border-radius: 6px; border: 1px solid #888; }
+  .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  button { font-size: 14px; padding: 6px 14px; border-radius: 6px; }
+</style></head>
+<body>
+<p>A tábla IP-címe (a táblán a Kivetítő alkalmazás kiírja):</p>
+<input id="ip" placeholder="pl. 10.0.12.34" autofocus>
+<div class="row"><button id="cancel">Mégse</button><button id="ok">Hozzáadás</button></div>
+<script src="prompt.js"></script>
+</body></html>

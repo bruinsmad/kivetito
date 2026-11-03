@@ -1,0 +1,39 @@
+{
+  "name": "kivetito",
+  "productName": "Kivetito",
+  "version": "1.0.0",
+  "description": "Kivetítő – laptop képernyő kivetítése az okostáblára egy kattintással",
+  "author": "Daniel Bruinsma",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "test": "node test/protocol-test.js"
+  },
+  "devDependencies": {
+    "electron": "^45.2.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "lol.bruinsma.kivetito",
+    "productName": "Kivetito",
+    "files": ["main.js", "lib/**", "capture/**", "assets/**"],
+    "directories": { "buildResources": "build", "output": "dist" },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "category": "public.app-category.education",
+      "extendInfo": { "LSUIElement": true }
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64", "arm64"] }]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "artifactName": "Kivetito-Setup-${version}-${arch}.${ext}"
+    }
+  }
+}
